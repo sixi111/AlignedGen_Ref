@@ -1,6 +1,6 @@
 # AlignedGen（复现版）: FLUX + 用户参考图风格注入
 
-[中文](./README.md) | [English](./README_EN.md)
+<!-- [中文](./README.md) | [English](./README_EN.md) -->
 
 基于 **[AlignedGen](https://arxiv.org/abs/2509.17088)** 的个人复现与扩展：  
 在原始「多 prompt 共享风格注意力（AAS）」能力上，新增了**用户参考图**分支，用于预计算参考 Q/K/V 并在主生成阶段按步注入。

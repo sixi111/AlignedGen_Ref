@@ -1,6 +1,6 @@
 # AlignedGen (Reproduction): FLUX with User Reference Image Style Injection
 
-[中文](./README.md) | [English](./README_EN.md)
+<!-- [中文](./README.md) | [English](./README_EN.md) -->
 
 This repository is a personal reproduction and extension of **[AlignedGen](https://arxiv.org/abs/2509.17088)**.  
 In addition to the original "style sharing across multiple prompts (AAS)", it adds a **user reference image** branch that precomputes reference Q/K/V and injects them step-by-step during generation.
