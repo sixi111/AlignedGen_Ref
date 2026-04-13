@@ -83,7 +83,10 @@ def main(args):
 
     ref_image = Image.open(args.style_reference_image).convert("RGB")
 
-    print("Generating with external style reference (precompute QKV per Appendix A)...")
+    print(
+        f"Generating (ref KV precompute: {args.reference_kv_precompute_mode})..."
+    )
+    preview_dir = output_dir if args.reference_kv_precompute_mode == "denoise" else None
     images = pipe(
         args.prompts,
         height=args.height,
@@ -95,13 +98,19 @@ def main(args):
         style_reference_image=ref_image,
         reference_prompt=args.reference_prompt,
         reference_cache_generator=torch.Generator("cpu").manual_seed(args.cache_seed),
+        reference_kv_precompute_mode=args.reference_kv_precompute_mode,
+        reference_denoise_preview_dir=preview_dir,
     ).images
     torch.cuda.empty_cache()
 
     for i, image in enumerate(images):
         image.save(os.path.join(output_dir, f"{i}.jpg"))
 
-    concat_result = concat_img(images, len(images))
+    preview_path = os.path.join(output_dir, "denoise_ref_preview.jpg")
+    concat_list = list(images)
+    if os.path.isfile(preview_path):
+        concat_list.insert(0, Image.open(preview_path).convert("RGB"))
+    concat_result = concat_img(concat_list, len(concat_list))
     concat_result.save(os.path.join(output_dir, "concat.jpg"))
     print(f"Saved to {output_dir}/")
 
@@ -128,7 +137,19 @@ if __name__ == "__main__":
     parser.add_argument("--guidance_scale", type=float, default=3.5)
     parser.add_argument("--num_inference_steps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--cache_seed", type=int, default=42, help="Noise seed for Appendix A interpolation cache.")
+    parser.add_argument(
+        "--cache_seed",
+        type=int,
+        default=42,
+        help="附录 A：插值噪声种子；denoise 模式：初始 packed latent 的高斯噪声种子。",
+    )
+    parser.add_argument(
+        "--reference_kv_precompute_mode",
+        type=str,
+        choices=["appendix_a", "denoise"],
+        default="appendix_a",
+        help="参考 KV 预计算：appendix_a=论文插值 latent；denoise=纯噪声+scheduler 逐步去噪并每步记录 KV。",
+    )
     parser.add_argument(
         "--local_files_only",
         action="store_true",
@@ -142,7 +163,7 @@ if __name__ == "__main__":
     parsed = parser.parse_args()
     if not parsed.prompts:
         parsed.prompts = [
-            "Dog in 3D realism style.",
+            # "Dog in 3D realism style.",
             "Clock in 3D realism style.",
             "Globe in 3D realism style.",
             "Bicycle in 3D realism style.",

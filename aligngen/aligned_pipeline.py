@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+import os
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -473,6 +474,20 @@ class FluxPipeline(
 
         return latents
 
+    def _packed_latents_to_pil_images(
+        self,
+        packed_latents: torch.FloatTensor,
+        height: int,
+        width: int,
+        output_type: str = "pil",
+    ) -> List[Image.Image]:
+        """将 packed FLUX latents 解码为 PIL 列表（与 __call__ 末尾 VAE 路径一致）。"""
+        lat = self._unpack_latents(packed_latents, height, width, self.vae_scale_factor)
+        lat = (lat / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+        lat = lat.to(device=self.vae.device, dtype=self.vae.dtype)
+        decoded = self.vae.decode(lat, return_dict=False)[0]
+        return self.image_processor.postprocess(decoded, output_type=output_type)
+
     def enable_vae_slicing(self):
         r"""
         Enable sliced VAE decoding. When this option is enabled, the VAE will split the input tensor in slices to
@@ -579,6 +594,8 @@ class FluxPipeline(
             style_reference_image: Optional[Union[str, Image.Image]] = None,
             reference_prompt: str = " ",
             reference_cache_generator: Optional[torch.Generator] = None,
+            reference_kv_precompute_mode: str = "appendix_a",
+            reference_denoise_preview_dir: Optional[str] = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -647,6 +664,12 @@ class FluxPipeline(
             reference_prompt (`str`, *optional*, defaults to a single space): Text encoding for the reference branch
                 during QKV precomputation only.
             reference_cache_generator (`torch.Generator`, *optional*): RNG for the noise term in Appendix-A interpolation.
+            reference_kv_precompute_mode (`str`, *optional*, defaults to ``"appendix_a"``):
+                ``appendix_a``：论文附录 A 噪声–参考 latent 插值；``denoise``：纯噪声经 ``scheduler.step``
+                逐步去噪并每步缓存 KV（与主去噪轨迹一致，用于验证）。
+            reference_denoise_preview_dir (`str`, *optional*):
+                若设置且 ``reference_kv_precompute_mode=="denoise"``，将预计算轨迹末步 latent 解码为
+                ``denoise_ref_preview.jpg`` 写入该目录。
 
         Examples:
 
@@ -738,11 +761,12 @@ class FluxPipeline(
             self.scheduler.config.base_shift,
             self.scheduler.config.max_shift,
         )
+        timesteps_in = timesteps  # 保留 __call__ 入参；retrieve 后会覆盖局部名 timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler,
             num_inference_steps,
             device,
-            timesteps,
+            timesteps_in,
             sigmas,
             mu=mu,
         )
@@ -751,6 +775,11 @@ class FluxPipeline(
 
         ref_kv_cache = None
         if style_reference_image is not None:
+            if reference_kv_precompute_mode not in ("appendix_a", "denoise"):
+                raise ValueError(
+                    f"reference_kv_precompute_mode must be 'appendix_a' or 'denoise', "
+                    f"got {reference_kv_precompute_mode!r}"
+                )
             if isinstance(style_reference_image, str):
                 ref_img = Image.open(style_reference_image).convert("RGB")
             else:
@@ -759,7 +788,7 @@ class FluxPipeline(
             for proc in self.transformer.attn_processors.values():
                 if hasattr(proc, "set_args") and hasattr(proc, "args"):
                     proc.set_args(replace(proc.args, external_style_reference=True))
-            ref_kv_cache = precompute_style_reference_kv_cache(
+            ref_kv_cache, denoise_final_packed = precompute_style_reference_kv_cache(
                 self,
                 ref_img,
                 reference_prompt,
@@ -772,7 +801,30 @@ class FluxPipeline(
                 device,
                 guidance_scale,
                 max_sequence_length,
+                precompute_mode=reference_kv_precompute_mode,
             )
+            # denoise 预计算内会多次 scheduler.step，推进 _step_index；主去噪前必须重置调度器
+            if reference_kv_precompute_mode == "denoise":
+                timesteps, num_inference_steps = retrieve_timesteps(
+                    self.scheduler,
+                    num_inference_steps,
+                    device,
+                    timesteps_in,
+                    sigmas,
+                    mu=mu,
+                )
+                if (
+                    denoise_final_packed is not None
+                    and reference_denoise_preview_dir
+                ):
+                    os.makedirs(reference_denoise_preview_dir, exist_ok=True)
+                    preview_imgs = self._packed_latents_to_pil_images(
+                        denoise_final_packed, height, width, output_type="pil"
+                    )
+                    preview_path = os.path.join(
+                        reference_denoise_preview_dir, "denoise_ref_preview.jpg"
+                    )
+                    preview_imgs[0].save(preview_path, quality=95)
 
         # handle guidance
         if self.transformer.config.guidance_embeds:

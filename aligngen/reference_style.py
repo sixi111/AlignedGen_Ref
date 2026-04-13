@@ -1,11 +1,11 @@
 """
-论文附录 A Algorithm 1：对用户给定参考图做前向加噪插值，并在每层 DiT 中缓存
-用于 AAS 拼接的图像 token 上的 K/V（与当前推理步对齐）。
+参考分支 KV 预计算：默认论文附录 A（噪声–参考 latent 插值）；可选 ``denoise``（纯噪声经 scheduler
+逐步去噪，每步缓存 KV，与主去噪轨迹一致，用于验证）。
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Tuple
 
 import torch
 from diffusers.utils.torch_utils import randn_tensor
@@ -55,6 +55,56 @@ def _encode_packed_latents(
     return latents, lh, lw
 
 
+def _packed_latents_pure_noise(
+    pipe: "FluxPipeline",
+    height: int,
+    width: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    generator: torch.Generator,
+) -> Tuple[torch.Tensor, int, int]:
+    """与 `prepare_latents` 一致：纯高斯噪声 packed latents（denoise 预计算分支用）。"""
+    lh, lw = _aligned_canvas_hw(pipe, height, width)
+    num_channels_latents = pipe.transformer.config.in_channels // 4
+    latents = randn_tensor(
+        (1, num_channels_latents, lh, lw),
+        generator=generator,
+        device=device,
+        dtype=dtype,
+    )
+    latents = pipe._pack_latents(latents, 1, num_channels_latents, lh, lw)
+    return latents, lh, lw
+
+
+def _arm_capture_for_step(
+    pipe: "FluxPipeline",
+    names: List[str],
+    step_index: int,
+    t: torch.Tensor,
+) -> None:
+    for name in names:
+        proc = pipe.transformer.attn_processors[name]
+        proc.set_timesteps(step_index, t)
+        proc._last_ref_q_pre = None
+        proc._last_ref_k_pre = None
+        proc._last_ref_k = None
+        proc._last_ref_v = None
+        proc.capture_ref_kv = True
+
+
+def _flush_capture_to_cache(pipe: "FluxPipeline", names: List[str], cache: RefKvCache) -> None:
+    for name in names:
+        proc = pipe.transformer.attn_processors[name]
+        proc.capture_ref_kv = False
+        if proc._last_ref_k is None:
+            z = torch.empty(0)
+            cache[name].append((z, z, z, z))
+        else:
+            q_pre = proc._last_ref_q_pre.clone() if proc._last_ref_q_pre is not None else torch.empty(0)
+            k_pre = proc._last_ref_k_pre.clone() if proc._last_ref_k_pre is not None else torch.empty(0)
+            cache[name].append((q_pre, k_pre, proc._last_ref_k.clone(), proc._last_ref_v.clone()))
+
+
 def clear_ref_overrides(pipe: "FluxPipeline") -> None:
     for proc in pipe.transformer.attn_processors.values():
         if hasattr(proc, "clear_ref_override"):
@@ -74,17 +124,28 @@ def precompute_style_reference_kv_cache(
     device: torch.device,
     guidance_scale: float,
     max_sequence_length: int,
-) -> RefKvCache:
+    precompute_mode: Literal["appendix_a", "denoise"] = "appendix_a",
+) -> Tuple[RefKvCache, Optional[torch.Tensor]]:
     """
-    按论文式对参考图 latent 与随机噪声做线性插值，在每个推理步上跑一次 batch=1 的 transformer，
-    并从 ShareAttnFluxAttnProcessor2_0 中捕获
-    (Q_img^ref, K_img^ref 于 AdaIN 前, k_/v_ 于 additional RoPE 后)，与论文 Concat 及 AdaIN(·,·^ref) 一致。
+    从 ShareAttnFluxAttnProcessor2_0 捕获 (Q_img^ref, K_img^ref 于 AdaIN 前, k_/v_ 于 additional RoPE 后)。
+
+    - ``appendix_a``：论文附录 A，参考图 latent 与随机噪声线性插值，每步一次 transformer。
+    - ``denoise``：从纯噪声出发，与主生成相同 ``scheduler.step`` 逐步去噪，每步记录 KV（验证轨迹）。
+
+    Returns:
+        ``(cache, denoise_final_latents)``：``denoise_final_latents`` 仅在 ``denoise`` 模式下为末步 packed
+        latent（供 pipeline 解码落盘）；``appendix_a`` 时为 ``None``。
     """
+    if precompute_mode not in ("appendix_a", "denoise"):
+        raise ValueError(f"precompute_mode must be 'appendix_a' or 'denoise', got {precompute_mode!r}")
     names = list(pipe.transformer.attn_processors.keys())
     cache: RefKvCache = {n: [] for n in names}
 
-    ref_latent, lh, lw = _encode_packed_latents(pipe, ref_image, height, width, dtype, device)  # 例：1024px→latent 128²→pack (4096,64)
-    noise = randn_tensor(ref_latent.shape, generator=generator, device=device, dtype=dtype)
+    if precompute_mode == "appendix_a":
+        ref_latent, lh, lw = _encode_packed_latents(pipe, ref_image, height, width, dtype, device)
+        noise = randn_tensor(ref_latent.shape, generator=generator, device=device, dtype=dtype)
+    else:
+        latents, lh, lw = _packed_latents_pure_noise(pipe, height, width, dtype, device, generator)
 
     (
         prompt_embeds,
@@ -109,47 +170,54 @@ def precompute_style_reference_kv_cache(
     else:
         guidance = None
 
-    denom = max(num_inference_steps - 1, 1)
-    for i, t in enumerate(timesteps):
-        # 附录 A: noise_input = (t/T)*noise + (1-t/T)*latent，与步索引对齐从噪声→原图
-        t_ratio = (num_inference_steps - 1 - i) / denom
-        noisy_latent = t_ratio * noise + (1.0 - t_ratio) * ref_latent
+    if precompute_mode == "denoise":
+        for i, t in enumerate(timesteps):
+            _arm_capture_for_step(pipe, names, i, t)
+            timestep = t.expand(1).to(latents.dtype)
+            noise_pred = pipe.transformer(
+                hidden_states=latents,
+                timestep=timestep / 1000,
+                guidance=guidance,
+                pooled_projections=pooled_prompt_embeds,
+                encoder_hidden_states=prompt_embeds,
+                txt_ids=text_ids,
+                img_ids=latent_image_ids,
+                concat_img_ids=reference_image_ids,
+                return_dict=False,
+            )[0]
+            _flush_capture_to_cache(pipe, names, cache)
+            latents_dtype = latents.dtype
+            latents = pipe.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+            if latents.dtype != latents_dtype:
+                latents = latents.to(latents_dtype)
+    else:
+        denom = max(num_inference_steps - 1, 1)
+        for i, t in enumerate(timesteps):
+            # 附录 A: noise_input = (t/T)*noise + (1-t/T)*latent，与步索引对齐从噪声→原图
+            t_ratio = (num_inference_steps - 1 - i) / denom
+            noisy_latent = t_ratio * noise + (1.0 - t_ratio) * ref_latent
 
-        timestep = t.expand(1).to(noisy_latent.dtype)
-        for name in names:
-            proc = pipe.transformer.attn_processors[name]
-            proc.set_timesteps(i, t)
-            proc._last_ref_q_pre = None
-            proc._last_ref_k_pre = None
-            proc._last_ref_k = None
-            proc._last_ref_v = None
-            proc.capture_ref_kv = True
+            timestep = t.expand(1).to(noisy_latent.dtype)
+            _arm_capture_for_step(pipe, names, i, t)
 
-        pipe.transformer(
-            hidden_states=noisy_latent,
-            timestep=timestep / 1000,
-            guidance=guidance,
-            pooled_projections=pooled_prompt_embeds,
-            encoder_hidden_states=prompt_embeds,
-            txt_ids=text_ids,
-            img_ids=latent_image_ids,
-            concat_img_ids=reference_image_ids,
-            return_dict=False,
-        )[0]
+            pipe.transformer(
+                hidden_states=noisy_latent,
+                timestep=timestep / 1000,
+                guidance=guidance,
+                pooled_projections=pooled_prompt_embeds,
+                encoder_hidden_states=prompt_embeds,
+                txt_ids=text_ids,
+                img_ids=latent_image_ids,
+                concat_img_ids=reference_image_ids,
+                return_dict=False,
+            )[0]
 
-        for name in names: 
-            proc = pipe.transformer.attn_processors[name]
-            proc.capture_ref_kv = False
-            if proc._last_ref_k is None:
-                z = torch.empty(0)
-                cache[name].append((z, z, z, z))
-            else:
-                q_pre = proc._last_ref_q_pre.clone() if proc._last_ref_q_pre is not None else torch.empty(0)
-                k_pre = proc._last_ref_k_pre.clone() if proc._last_ref_k_pre is not None else torch.empty(0)
-                cache[name].append((q_pre, k_pre, proc._last_ref_k.clone(), proc._last_ref_v.clone()))
+            _flush_capture_to_cache(pipe, names, cache)
 
     torch.cuda.empty_cache()
-    return cache
+    if precompute_mode == "denoise":
+        return cache, latents
+    return cache, None
 
 
 def apply_kv_cache_for_step(pipe: "FluxPipeline", cache: RefKvCache, step_index: int, device: torch.device) -> None:
