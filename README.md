@@ -1,25 +1,42 @@
-# AlignedGen（复现）— 带用户参考图的 FLUX 版本
+# AlignedGen (Reproduction): FLUX with User Reference Image Style Injection
 
-本仓库是在 **[AlignedGen](https://arxiv.org/abs/2509.17088)**（NeurIPS 2025，PKU 团队）工作基础上的**个人复现与扩展**：在原有「多 prompt 共享风格注意力（AAS）」之上，增加了**用户给定参考图**时的风格注入流程，便于做实验与对比。
+[中文](./README.md) | [English](./README_EN.md)
 
-> 若你关心论文原始设定与更多展示，请优先阅读 [官方项目页](https://jiexuanz.github.io/AlignedGen/) 与 [arXiv:2509.17088](https://arxiv.org/abs/2509.17088)。本 README 仅描述**本仓库**的行为与用法。
+This repository is a personal reproduction and extension of **[AlignedGen](https://arxiv.org/abs/2509.17088)**.  
+In addition to the original "style sharing across multiple prompts (AAS)", it adds a **user reference image** branch that precomputes reference Q/K/V and injects them step-by-step during generation.
 
----
-
-## 与官方代码的主要差异（本仓库做了什么）
-
-| 能力 | 说明 |
-|------|------|
-| **外部参考图** | 对用户提供的风格参考图做 **Q/K/V 预计算**（见 `aligngen/reference_style.py`），在主生成每一步将缓存写入 `ShareAttnFluxAttnProcessor2_0`（`ref_*_override`），与 AAS 中的 AdaIN + 拼接键一致。 |
-| **Pipeline** | `aligngen/aligned_pipeline.py` 中 `FluxPipeline.__call__` 增加 `style_reference_image`、`reference_prompt`、`reference_cache_generator` 等参数。 |
-| **预计算** | 论文附录 A：对参考图 latent 与随机噪声做线性插值，在每个推理步上跑一次 transformer 并缓存 KV（见 `precompute_style_reference_kv_cache`）。 |
-| **推理入口** | `inference_reference.py`：带参考图的批量生成；`inference.py`：仍接近原版「仅 batch 内风格对齐」用法（若保留）。 |
-
-本仓库**不是**官方 AlignedGen 发行版的镜像；若要与论文表格严格对齐，请以原作者发布版本为准。
+> Note: this repo documents a reproduction and engineering modifications, not the official release mirror.  
+> For strict paper-level setup and results, please refer to the [official project page](https://jiexuanz.github.io/AlignedGen/) and the [paper](https://arxiv.org/abs/2509.17088).
 
 ---
 
-## 环境依赖（示例）
+## Table of Contents
+
+- [What Is Added](#what-is-added)
+- [Quick Start](#quick-start)
+- [Inference Modes](#inference-modes)
+- [Key Arguments](#key-arguments)
+- [Code Structure](#code-structure)
+- [FAQ](#faq)
+- [Acknowledgements and Citation](#acknowledgements-and-citation)
+- [License](#license)
+
+---
+
+## What Is Added
+
+| Module | Changes |
+|---|---|
+| Reference precompute | Precomputes Q/K/V from a user reference image, with caches managed in `aligngen/reference_style.py`. |
+| Attention processor | `ShareAttnFluxAttnProcessor2_0` supports `ref_*_override` to override/concatenate reference key-values at each denoising step. |
+| Pipeline extension | `FluxPipeline.__call__` in `aligngen/aligned_pipeline.py` adds `style_reference_image`, `reference_prompt`, `reference_cache_generator`, etc. |
+| Entry scripts | `inference_reference.py` for "with reference image"; `inference.py` for "without external reference image". |
+
+---
+
+## Quick Start
+
+### 1) Environment setup (example)
 
 ```bash
 conda create -n aligned python=3.10
@@ -28,58 +45,80 @@ conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 -c pytorch
 pip install diffusers transformers sentencepiece protobuf==3.19.0
 ```
 
-需能访问 **FLUX.1-dev**（本地路径或 Hub）。
+### 2) Model access
+
+Make sure `black-forest-labs/FLUX.1-dev` is accessible (local path or Hugging Face Hub).
 
 ---
 
-## 推理
+## Inference Modes
 
-### 1. 原版风格：多 prompt、无外部参考图
+### A. No external reference image (close to original AAS)
 
 ```bash
-python inference.py --model_path black-forest-labs/FLUX.1-dev --style_lambda 1.1
+python inference.py \
+  --model_path black-forest-labs/FLUX.1-dev \
+  --style_lambda 1.1
 ```
 
-（具体参数以 `inference.py` 内 argparse 为准。）
-
-### 2. 本仓库重点：用户参考图 + 预计算 KV 注入
+### B. With user reference image (recommended)
 
 ```bash
 python inference_reference.py \
   --model_path black-forest-labs/FLUX.1-dev \
   --style_reference_image path/to/your_style.jpg \
-  --reference_prompt "与参考图内容/风格一致的短描述" \
+  --reference_prompt "A short prompt aligned with the reference content/style" \
   --style_lambda 1.1 \
   --num_inference_steps 30 \
   --output_dir output_ref
 ```
 
-常用参数含义简述：
+---
 
-- **`--reference_prompt`**：仅用于**预计算参考分支**时的文本编码；过空时参考侧语义弱，建议写清风格/内容。
-- **`--cache_seed`**：附录 A 插值中与参考 latent 混合的**随机噪声**种子（`randn_tensor`）。
+## Key Arguments
 
-显存不足时可减少 prompt 条数、降低分辨率，或在 pipeline 内按需开启 offload（若你已接入）。
+| Argument | Purpose | Recommendation |
+|---|---|---|
+| `--style_reference_image` | Path to style reference image | Use a clean RGB image with clear style cues. |
+| `--reference_prompt` | Text encoding for reference branch only | Avoid leaving empty; include style/subject hints. |
+| `--style_lambda` | Style injection strength | Typical starting range: `1.0 ~ 1.2`. |
+| `--cache_seed` | Noise seed for reference branch | Keep fixed for reproducible experiments. |
+| `--reference_kv_precompute_mode` | Reference KV precompute strategy | `appendix_a` or `denoise`. |
+| `--num_inference_steps` | Number of denoising steps | Increase for quality, reduce for speed. |
 
 ---
 
-## 代码结构（与参考图相关）
+## Code Structure
 
-```
+```text
 aligngen/
-  reference_style.py    # 参考 KV 预计算、apply_kv_cache_for_step
-  attention_processor.py  # ShareAttnFluxAttnProcessor2_0：AdaIN、ref 覆盖、拼接
-  aligned_pipeline.py   # FluxPipeline：参考图分支与去噪循环
-  aligned_transformer.py
-inference_reference.py  # 带参考图的命令行入口
-inference.py            # 无外部参考时的入口（若保留）
+  reference_style.py       # Reference KV precompute and per-step injection
+  attention_processor.py   # ShareAttnFluxAttnProcessor2_0 (AdaIN / override / concat)
+  aligned_pipeline.py      # Main pipeline flow (reference branch + denoising loop)
+  aligned_transformer.py   # Transformer and attention processor integration
+inference_reference.py     # Entry point with reference image
+inference.py               # Entry point without external reference image
 ```
 
 ---
 
-## 致谢与引用
+## FAQ
 
-实现依赖 [StyleAligned](https://github.com/google/style-aligned) 与 [Diffusers](https://github.com/huggingface/diffusers) 等开源生态。**AlignedGen 方法本身**请引用原论文：
+**1) Out-of-memory issues?**  
+Reduce prompt count, resolution, or inference steps first; then use offloading if available in your setup.
+
+**2) Style looks weak or unstable?**  
+Check whether `--reference_prompt` is too vague, then tune `--style_lambda`.
+
+**3) How to run reproducible comparisons?**  
+Fix `--seed` and `--cache_seed`, and record `--reference_kv_precompute_mode` plus step count.
+
+---
+
+## Acknowledgements and Citation
+
+This implementation builds on open-source projects such as [StyleAligned](https://github.com/google/style-aligned) and [Diffusers](https://github.com/huggingface/diffusers).  
+If you cite the **AlignedGen method**, please cite the original paper:
 
 ```bibtex
 @article{zhang2025alignedgen,
@@ -90,10 +129,13 @@ inference.py            # 无外部参考时的入口（若保留）
 }
 ```
 
-若你在论文或报告中使用本仓库的**参考图扩展实现**，建议在正文中说明为「基于 AlignedGen 的复现/修改版本」，并区分于官方发布代码。
+If you use this repository in papers/reports, consider describing it as "a reproduction/modification based on AlignedGen."
 
 ---
 
-## 许可证
+## License
 
-请同时遵守本仓库内各文件头声明的许可证（如 Apache 2.0 等）以及你所使用的 **FLUX / diffusers** 模型的使用条款。
+Please comply with:
+
+- File-level licenses in this repository (for example Apache 2.0 where specified)
+- Usage terms of the models and dependencies (for example FLUX / diffusers)
