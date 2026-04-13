@@ -14,7 +14,10 @@
 
 import inspect
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Union
+
+from PIL import Image
 
 import numpy as np
 import torch
@@ -36,6 +39,12 @@ from diffusers.utils import (
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.flux.pipeline_output import FluxPipelineOutput
+
+from aligngen.reference_style import (
+    apply_kv_cache_for_step,
+    clear_ref_overrides,
+    precompute_style_reference_kv_cache,
+)
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -521,10 +530,10 @@ class FluxPipeline(
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
 
-        latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-        latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
+        latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)  #[4, 16, 128, 128]
+        latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)  # [4, 4096, 64]
 
-        latent_image_ids = self._prepare_latent_image_ids(batch_size, height // 2, width // 2, device, dtype)
+        latent_image_ids = self._prepare_latent_image_ids(batch_size, height // 2, width // 2, device, dtype)   # [4096, 3]
 
         return latents, latent_image_ids
 
@@ -567,6 +576,9 @@ class FluxPipeline(
             callback_on_step_end_tensor_inputs: List[str] = ["latents"],
             max_sequence_length: int = 512,
             use_same_latent: bool = False,
+            style_reference_image: Optional[Union[str, Image.Image]] = None,
+            reference_prompt: str = " ",
+            reference_cache_generator: Optional[torch.Generator] = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -629,6 +641,12 @@ class FluxPipeline(
                 will be passed as `callback_kwargs` argument. You will only be able to include variables listed in the
                 `._callback_tensor_inputs` attribute of your pipeline class.
             max_sequence_length (`int` defaults to 512): Maximum sequence length to use with the `prompt`.
+            style_reference_image (`str` or `PIL.Image`, *optional*):
+                User-provided style image. Enables Appendix-A QKV cache and injects K/V into AAS (requires
+                `ShareAttnFluxAttnProcessor2_0` and matching resolution).
+            reference_prompt (`str`, *optional*, defaults to a single space): Text encoding for the reference branch
+                during QKV precomputation only.
+            reference_cache_generator (`torch.Generator`, *optional*): RNG for the noise term in Appendix-A interpolation.
 
         Examples:
 
@@ -696,7 +714,7 @@ class FluxPipeline(
             device,
             generator,
             latents,
-        )
+        )   # [4, 4096, 64]
         if use_same_latent:
             print(f"Using same initial noise! pre latents shape:{latents.shape}")
             bs_ = latents.shape[0]
@@ -704,7 +722,9 @@ class FluxPipeline(
             print(f"process latents shape:{latents.shape}")
 
         # ****************************************************************************************
-        reference_image_ids = deepcopy(latent_image_ids)
+        reference_image_ids = deepcopy(latent_image_ids)    # [4096, 3]
+        # 与预计算参考 KV 时一致；注意：主去噪里 `image_rotary_emb_additional` 作用在 k_ 上后会被
+        # `ref_k_override` 整段替换（见 attention_processor），故仅开/关本行时结果常相同，并非 RoPE 无效。
         reference_image_ids[:, 2] += width // 16
         # ****************************************************************************************
 
@@ -729,6 +749,31 @@ class FluxPipeline(
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
+        ref_kv_cache = None
+        if style_reference_image is not None:
+            if isinstance(style_reference_image, str):
+                ref_img = Image.open(style_reference_image).convert("RGB")
+            else:
+                ref_img = style_reference_image.convert("RGB")
+            ref_gen = reference_cache_generator or torch.Generator(device="cpu").manual_seed(42)
+            for proc in self.transformer.attn_processors.values():
+                if hasattr(proc, "set_args") and hasattr(proc, "args"):
+                    proc.set_args(replace(proc.args, external_style_reference=True))
+            ref_kv_cache = precompute_style_reference_kv_cache(
+                self,
+                ref_img,
+                reference_prompt,
+                height,
+                width,
+                num_inference_steps,
+                timesteps,
+                ref_gen,
+                prompt_embeds.dtype,
+                device,
+                guidance_scale,
+                max_sequence_length,
+            )
+
         # handle guidance
         if self.transformer.config.guidance_embeds:
             guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
@@ -748,6 +793,9 @@ class FluxPipeline(
                     self.transformer.attn_processors[name].set_timesteps(i, t)
                 # ****************************************************************************************
 
+                if ref_kv_cache is not None:
+                    apply_kv_cache_for_step(self, ref_kv_cache, i, device)
+
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
@@ -765,6 +813,9 @@ class FluxPipeline(
                     concat_img_ids=reference_image_ids,
                     # ****************************************************************************************
                 )[0]
+
+                if ref_kv_cache is not None:
+                    clear_ref_overrides(self)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype

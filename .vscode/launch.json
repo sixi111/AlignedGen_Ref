@@ -1,0 +1,99 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "inference_reference (工作区为 /yijie 时)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/STY/AlignedGen_Ref/inference_reference.py",
+      "cwd": "${workspaceFolder}/STY/AlignedGen_Ref",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--model_path",
+        "/yijie/STY/FLUX.1-dev",
+        "--style_reference_image",
+        "${input:styleRefImage}",
+        "--reference_prompt",
+        "${input:referencePrompt}",
+        "--style_lambda",
+        "1.1",
+        "--output_dir",
+        "output_ref_debug",
+        "--num_inference_steps",
+        "30"
+      ],
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0"
+      }
+    },
+    {
+      "name": "inference_reference (仅打开 AlignedGen_Ref 文件夹时)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/inference_reference.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--model_path",
+        "/yijie/STY/FLUX.1-dev",
+        "--style_reference_image",
+        "${input:styleRefImage}",
+        "--reference_prompt",
+        "${input:referencePrompt}",
+        "--style_lambda",
+        "1.1",
+        "--output_dir",
+        "output_ref_debug",
+        "--num_inference_steps",
+        "30"
+      ],
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0"
+      }
+    },
+    {
+      "name": "inference_reference (Denoise Mode)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/inference_reference.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--model_path",
+        "/yijie/STY/FLUX.1-dev",
+        "--style_reference_image",
+        "${input:styleRefImage}",
+        "--reference_prompt",
+        "${input:referencePrompt}",
+        "--reference_kv_precompute_mode",
+        "denoise",
+        "--style_lambda",
+        "1.1",
+        "--output_dir",
+        "output_ref_debug",
+        "--num_inference_steps",
+        "30"
+      ],
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "styleRefImage",
+      "type": "promptString",
+      "description": "参考风格图路径（相对 STY/AlignedGen_Ref 或绝对路径）",
+      "default": "/yijie/STY/AlignedGen_Ref/ref.jpg"
+    },
+    {
+      "id": "referencePrompt",
+      "type": "promptString",
+      "description": "预计算参考分支用的 caption（encode_prompt，建议与参考图内容/风格一致）",
+      "default": "Anchor in 3D realism style."
+    }
+  ]
+}

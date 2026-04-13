@@ -1,36 +1,25 @@
-<div align="center">
+# AlignedGen（复现）— 带用户参考图的 FLUX 版本
 
-# [NeurIPS 2025🔥] AlignedGen: Aligning Style Across Generated Images
+本仓库是在 **[AlignedGen](https://arxiv.org/abs/2509.17088)**（NeurIPS 2025，PKU 团队）工作基础上的**个人复现与扩展**：在原有「多 prompt 共享风格注意力（AAS）」之上，增加了**用户给定参考图**时的风格注入流程，便于做实验与对比。
 
-[![Project Website](https://img.shields.io/badge/🌐-Project%20Website-deepgray)](https://jiexuanz.github.io/AlignedGen/)
-[![arXiv](https://img.shields.io/badge/arXiv-2509.17088-b31b1b.svg)](https://arxiv.org/abs/2509.17088 )
+> 若你关心论文原始设定与更多展示，请优先阅读 [官方项目页](https://jiexuanz.github.io/AlignedGen/) 与 [arXiv:2509.17088](https://arxiv.org/abs/2509.17088)。本 README 仅描述**本仓库**的行为与用法。
 
-Jiexuan Zhang, Yiheng Du, [Qian Wang](https://akaneqwq.github.io/), Yu
-Gu, [Weiqi Li](https://scholar.google.com/citations?user=SIkQdEsAAAAJ), [Jian Zhang](https://jianzhang.tech/)
+---
 
-School of Electronic and Computer Engineering, Peking University
+## 与官方代码的主要差异（本仓库做了什么）
 
-</div>
+| 能力 | 说明 |
+|------|------|
+| **外部参考图** | 对用户提供的风格参考图做 **Q/K/V 预计算**（见 `aligngen/reference_style.py`），在主生成每一步将缓存写入 `ShareAttnFluxAttnProcessor2_0`（`ref_*_override`），与 AAS 中的 AdaIN + 拼接键一致。 |
+| **Pipeline** | `aligngen/aligned_pipeline.py` 中 `FluxPipeline.__call__` 增加 `style_reference_image`、`reference_prompt`、`reference_cache_generator`、`reference_kv_precompute_mode` 等参数。 |
+| **预计算模式** | `reference_kv_precompute_mode="appendix_a"`：论文附录 A 的噪声–参考 latent **插值**轨迹；`"denoise"`：**纯噪声 + scheduler** 逐步去噪并每步记录 KV（用于验证轨迹是否与主推理一致）。 |
+| **推理入口** | `inference_reference.py`：带参考图的批量生成；`inference.py`：仍接近原版「仅 batch 内风格对齐」用法（若保留）。 |
 
-----
+本仓库**不是**官方 AlignedGen 发行版的镜像；若要与论文表格严格对齐，请以原作者发布版本为准。
 
-## 🔥 Introduction
+---
 
-
-AlignedGen generates a set of images with a consistent style from a set of prompts.
-
-For example, given the prompts: `{Anchor, Clock, Globe, Bicycle} in 3D realism style.`, AlignedGen will produce the results shown below. For more details on how to run the model, please see the [Inference section](#-inference). Additional examples are available on our [project website](https://jiexuanz.github.io/AlignedGen/).
-
-## <img id="main" width="100%" src="asset/main.jpg"> 
-
-
-
-
-## 🚩 News
-
-- 09.23 Released paper and code.
-
-## 🔧 Dependencies and Installation
+## 环境依赖（示例）
 
 ```bash
 conda create -n aligned python=3.10
@@ -39,58 +28,61 @@ conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 -c pytorch
 pip install diffusers transformers sentencepiece protobuf==3.19.0
 ```
 
-## ⚡ Inference
+需能访问 **FLUX.1-dev**（本地路径或 Hub）。
 
-Before running, please ensure FLUX.1-dev model is accessible to the script.
-Then, run the inference script with the following command:
+---
 
-```
+## 推理
+
+### 1. 原版风格：多 prompt、无外部参考图
+
+```bash
 python inference.py --model_path black-forest-labs/FLUX.1-dev --style_lambda 1.1
 ```
 
-This will generate the image shown at the beginning of this README.
+（具体参数以 `inference.py` 内 argparse 为准。）
 
-**Note on VRAM**: If you encounter out-of-memory errors, try reducing the number of prompts or enabling the offload option within the pipeline.
+### 2. 本仓库重点：用户参考图 + 预计算 KV 注入
 
-## 📊 Compare With Other Methods
+```bash
+python inference_reference.py \
+  --model_path black-forest-labs/FLUX.1-dev \
+  --style_reference_image path/to/your_style.jpg \
+  --reference_prompt "与参考图内容/风格一致的短描述" \
+  --style_lambda 1.1 \
+  --num_inference_steps 30 \
+  --output_dir output_ref
+```
 
-## <img id="compare" width="100%" src="asset/compare.png"> 
+常用参数含义简述：
 
+- **`--reference_prompt`**：仅用于**预计算参考分支**时的文本编码；过空时参考侧语义弱，建议写清风格/内容。
+- **`--cache_seed`**：附录 A 插值里的噪声种子；在 **`denoise`** 预计算模式下也用于**初始 latent** 的高斯噪声。
+- **`--reference_kv_precompute_mode`**：`appendix_a`（默认）或 `denoise`（验证用全 scheduler 轨迹）。
 
-## 🌟 User-Provided Image As Style Reference
+显存不足时可减少 prompt 条数、降低分辨率，或在 pipeline 内按需开启 offload（若你已接入）。
 
-## <img id="seamless" width="100%" src="asset/seamless.png"> 
+---
 
-## 🤔 Control & DreamBooth
-
-<div align="center">
-  <img src="asset/supp-control.png" width="275" style="" />
-</div>
-<div align="center">
-  <img src="asset/supp-dream.png" width="300" style="" />
-</div>
-
-## ✏️ To Do List
-
-- [x] Release the paper and code
-- [ ] Release ControlNet Code
-- [ ] Release DreamBooth Code
-- [ ] Release Attention Map Visualization Code
-- [ ] Release User-Provided Image As Style Inference Code
-- [ ] Support Qwen-Image
-- [ ] Support ComfyUI
-- [ ] Support Gradio demo
-
-## Acknowledgement
-
-We appreciate the releasing codes of [StyleAligned](https://github.com/google/style-aligned)
-and [Diffusers](https://github.com/huggingface/diffusers).
-
-## Citation
-
-If our work assists your research, feel free to give us a star ⭐ or cite us using:
+## 代码结构（与参考图相关）
 
 ```
+aligngen/
+  reference_style.py    # 参考 KV 预计算、apply_kv_cache_for_step
+  attention_processor.py  # ShareAttnFluxAttnProcessor2_0：AdaIN、ref 覆盖、拼接
+  aligned_pipeline.py   # FluxPipeline：参考图分支与去噪循环
+  aligned_transformer.py
+inference_reference.py  # 带参考图的命令行入口
+inference.py            # 无外部参考时的入口（若保留）
+```
+
+---
+
+## 致谢与引用
+
+实现依赖 [StyleAligned](https://github.com/google/style-aligned) 与 [Diffusers](https://github.com/huggingface/diffusers) 等开源生态。**AlignedGen 方法本身**请引用原论文：
+
+```bibtex
 @article{zhang2025alignedgen,
   title={AlignedGen: Aligning Style Across Generated Images},
   author={Zhang, Jiexuan and Du, Yiheng and Wang, Qian and Li, Weiqi and Gu, Yu and Zhang, Jian},
@@ -99,13 +91,10 @@ If our work assists your research, feel free to give us a star ⭐ or cite us us
 }
 ```
 
-[//]: # ()
-[//]: # (---)
+若你在论文或报告中使用本仓库的**参考图扩展实现**，建议在正文中说明为「基于 AlignedGen 的复现/修改版本」，并区分于官方发布代码。
 
-[//]: # (## ⭐️ Star History)
+---
 
-[//]: # ()
-[//]: # ([![Star History Chart]&#40;https://api.star-history.com/svg?repos=Jiexuanz/AlignedGen&type=Date&#41;]&#40;https://www.star-history.com/#Jiexuanz/AlignedGen&Date&#41;)
+## 许可证
 
-[//]: # ()
-
+请同时遵守本仓库内各文件头声明的许可证（如 Apache 2.0 等）以及你所使用的 **FLUX / diffusers** 模型的使用条款。
