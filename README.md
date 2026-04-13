@@ -17,7 +17,6 @@ In addition to the original "style sharing across multiple prompts (AAS)", it ad
 - [Inference Modes](#inference-modes)
 - [Key Arguments](#key-arguments)
 - [Code Structure](#code-structure)
-- [FAQ](#faq)
 - [Acknowledgements and Citation](#acknowledgements-and-citation)
 - [License](#license)
 
@@ -99,19 +98,6 @@ aligngen/
 inference_reference.py     # Entry point with reference image
 inference.py               # Entry point without external reference image
 ```
-
----
-
-## FAQ
-
-**1) Out-of-memory issues?**  
-Reduce prompt count, resolution, or inference steps first; then use offloading if available in your setup.
-
-**2) Style looks weak or unstable?**  
-Check whether `--reference_prompt` is too vague, then tune `--style_lambda`.
-
-**3) How to run reproducible comparisons?**  
-Fix `--seed` and `--cache_seed`, and record `--reference_kv_precompute_mode` plus step count.
 
 ---
 
