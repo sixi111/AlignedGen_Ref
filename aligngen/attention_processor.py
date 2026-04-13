@@ -310,8 +310,16 @@ class ShareAttnFluxAttnProcessor2_0:
 
         if not self.capture_ref_kv:
             # K^F = Concat(K_txt, \hat{K}_img^tar, K_img^ref)；V^F = Concat(V_txt, V_img^tar, V_img^ref)（Q^F 不拼 ref）
-            key = concat_first_block(key, k_, -2, scale=self.scale) # (batch, heads, seq_len, head_dim)
-            value = concat_first_block(value, v_, -2)
+            if self.args.external_style_reference:
+                # 外部参考图：batch 内没有锚图，所有目标图统一缩放
+                bs = key.shape[0]
+                feat_style_k = (self.scale * k_[0]).unsqueeze(0).expand(bs, -1, -1, -1)
+                key = torch.cat((key, feat_style_k), dim=-2)
+                feat_style_v = v_[0].unsqueeze(0).expand(bs, -1, -1, -1)
+                value = torch.cat((value, feat_style_v), dim=-2)
+            else:
+                key = concat_first_block(key, k_, -2, scale=self.scale) # (batch, heads, seq_len, head_dim)
+                value = concat_first_block(value, v_, -2)
 
         if self.args.constrain_first and not self.args.external_style_reference:
             rows, cols = query.shape[-2], key.shape[-2]

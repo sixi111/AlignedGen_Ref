@@ -109,11 +109,10 @@ def precompute_style_reference_kv_cache(
     else:
         guidance = None
 
-    denom = max(num_inference_steps - 1, 1)
     for i, t in enumerate(timesteps):
-        # 附录 A: noise_input = (t/T)*noise + (1-t/T)*latent，与步索引对齐从噪声→原图
-        t_ratio = (num_inference_steps - 1 - i) / denom
-        noisy_latent = t_ratio * noise + (1.0 - t_ratio) * ref_latent
+        # 使用 scheduler 实际的 sigma（= t/1000）做插值，与主去噪循环的噪声水平对齐
+        sigma = t.item() / 1000.0
+        noisy_latent = sigma * noise + (1.0 - sigma) * ref_latent
 
         timestep = t.expand(1).to(noisy_latent.dtype)
         for name in names:
