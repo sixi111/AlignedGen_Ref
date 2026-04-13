@@ -52,34 +52,6 @@
       "env": {
         "CUDA_VISIBLE_DEVICES": "0"
       }
-    },
-    {
-      "name": "inference_reference (Denoise Mode)",
-      "type": "python",
-      "request": "launch",
-      "program": "${workspaceFolder}/inference_reference.py",
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "justMyCode": true,
-      "args": [
-        "--model_path",
-        "/yijie/STY/FLUX.1-dev",
-        "--style_reference_image",
-        "${input:styleRefImage}",
-        "--reference_prompt",
-        "${input:referencePrompt}",
-        "--reference_kv_precompute_mode",
-        "denoise",
-        "--style_lambda",
-        "1.1",
-        "--output_dir",
-        "output_ref_debug",
-        "--num_inference_steps",
-        "30"
-      ],
-      "env": {
-        "CUDA_VISIBLE_DEVICES": "0"
-      }
     }
   ],
   "inputs": [

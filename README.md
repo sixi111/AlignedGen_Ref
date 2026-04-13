@@ -11,8 +11,8 @@
 | 能力 | 说明 |
 |------|------|
 | **外部参考图** | 对用户提供的风格参考图做 **Q/K/V 预计算**（见 `aligngen/reference_style.py`），在主生成每一步将缓存写入 `ShareAttnFluxAttnProcessor2_0`（`ref_*_override`），与 AAS 中的 AdaIN + 拼接键一致。 |
-| **Pipeline** | `aligngen/aligned_pipeline.py` 中 `FluxPipeline.__call__` 增加 `style_reference_image`、`reference_prompt`、`reference_cache_generator`、`reference_kv_precompute_mode` 等参数。 |
-| **预计算模式** | `reference_kv_precompute_mode="appendix_a"`：论文附录 A 的噪声–参考 latent **插值**轨迹；`"denoise"`：**纯噪声 + scheduler** 逐步去噪并每步记录 KV（用于验证轨迹是否与主推理一致）。 |
+| **Pipeline** | `aligngen/aligned_pipeline.py` 中 `FluxPipeline.__call__` 增加 `style_reference_image`、`reference_prompt`、`reference_cache_generator` 等参数。 |
+| **预计算** | 论文附录 A：对参考图 latent 与随机噪声做线性插值，在每个推理步上跑一次 transformer 并缓存 KV（见 `precompute_style_reference_kv_cache`）。 |
 | **推理入口** | `inference_reference.py`：带参考图的批量生成；`inference.py`：仍接近原版「仅 batch 内风格对齐」用法（若保留）。 |
 
 本仓库**不是**官方 AlignedGen 发行版的镜像；若要与论文表格严格对齐，请以原作者发布版本为准。
@@ -57,8 +57,7 @@ python inference_reference.py \
 常用参数含义简述：
 
 - **`--reference_prompt`**：仅用于**预计算参考分支**时的文本编码；过空时参考侧语义弱，建议写清风格/内容。
-- **`--cache_seed`**：附录 A 插值里的噪声种子；在 **`denoise`** 预计算模式下也用于**初始 latent** 的高斯噪声。
-- **`--reference_kv_precompute_mode`**：`appendix_a`（默认）或 `denoise`（验证用全 scheduler 轨迹）。
+- **`--cache_seed`**：附录 A 插值中与参考 latent 混合的**随机噪声**种子（`randn_tensor`）。
 
 显存不足时可减少 prompt 条数、降低分辨率，或在 pipeline 内按需开启 offload（若你已接入）。
 
